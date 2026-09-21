@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>linecalc · bserve</title>
+<style>
+  body { font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+         max-width: 40rem; margin: 4rem auto; padding: 0 1rem;
+         color: #d8dee9; background: #10141a; }
+  h1 { font-size: 1.4rem; color: #8fbcbb; }
+  code { color: #ebcb8b; }
+  a { color: #88c0d0; }
+</style>
+<h1>It came over LCB/1.</h1>
+<p>
+  These bytes reached you inside a <code>RESPONSE</code> frame followed by one or more
+  <code>DATA</code> frames, over a single TCP connection that is still open.
+</p>
+<p>
+  The frame header is eight octets: a 24-bit length, an 8-bit type, 8 bits of flags, one
+  reserved bit, and a 23-bit stream id. The wire format is written down in
+  <code>docs/SPEC.md</code>, and every octet of one exchange is annotated in
+  <code>docs/annotated-frame.md</code>.
+</p>
+<p>Try <code>./bcurl -v localhost:9000/index.html</code> to watch it arrive.</p>
