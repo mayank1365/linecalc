@@ -1,0 +1,9 @@
+#!/bin/sh
+# LCB/1 client.  usage: ./bcurl [-v] [-I] <host:port/path> [more paths on the same host...]
+set -e
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ ! -d "$dir/target/classes" ]; then
+  echo "build first:  mvn -q package" >&2
+  exit 2
+fi
+exec java -cp "$dir/target/classes" linecalc.client.BinaryClient "$@"
