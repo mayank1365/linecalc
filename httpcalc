@@ -1,0 +1,9 @@
+#!/bin/sh
+# Persistent HTTP/1.1 calculator.  usage: ./httpcalc [port]   (default 8080)
+set -e
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ ! -d "$dir/target/classes" ]; then
+  echo "build first:  mvn -q package" >&2
+  exit 2
+fi
+exec java -cp "$dir/target/classes" linecalc.server.HttpCalcServer "$@"
