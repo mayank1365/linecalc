@@ -274,3 +274,51 @@ A server MUST distinguish two failures:
 
 `docs/annotated-frame.md` contains a complete request and response captured from the reference
 implementation, every octet annotated.
+
+---
+
+## 9. Conformance checklist
+
+An implementation is LCB/1 conformant if all of the following hold. Each line is a thing a
+peer can actually do to you.
+
+**Framing**
+
+- [ ] The client sends `4c 43 42 31` before its first frame; the server closes without reply on
+      anything else.
+- [ ] Every frame header is read as exactly 8 octets and every payload as exactly `Length`.
+- [ ] A frame with `Length` above 65,536 is skipped (all `Length` octets discarded) and
+      answered `400` — **not** closed.
+- [ ] A truncated header or payload closes the connection; it is not answered and resumed.
+
+**Extensibility — the rule in §4**
+
+- [ ] An unknown frame **type** is skipped cleanly and the connection continues.
+- [ ] An undefined **flag** bit is ignored, not rejected.
+- [ ] The **R** bit is ignored on receipt and sent as 0.
+
+**Streams**
+
+- [ ] Client stream ids are odd, non-zero, and strictly increasing; violations are `400`.
+- [ ] `PING` uses stream id 0; nothing else does.
+- [ ] Responses are emitted on the stream id of their request.
+
+**Header blocks**
+
+- [ ] The block is parsed until the payload is exhausted, with no field count consulted.
+- [ ] Static indices 1–10 decode to §6.1's names in that order; index 0 reads a literal name;
+      an index above 10 is `400`.
+- [ ] Values are read as exactly their 16-bit length, including `:status`.
+- [ ] Names are lowercase; a name with uppercase or non-token octets is `400`.
+
+**Semantics**
+
+- [ ] `REQUEST` carries `:method`, `:path` and `host`, and sets `END_MESSAGE`.
+- [ ] `RESPONSE` carries `:status`.
+- [ ] The last `DATA` frame sets `END_MESSAGE`; an empty body is one zero-length `DATA` with it.
+- [ ] A `HEAD` response sets `END_MESSAGE` on the `RESPONSE` frame and sends no `DATA`.
+- [ ] A `PING` without `ACK` is echoed with `ACK` and the same payload; a `PING` with `ACK` is
+      not answered.
+- [ ] Paths resolving outside the document root are `403`; missing files are `404`; methods
+      other than `GET`/`HEAD` are `405`.
+- [ ] The connection stays open across all of the above except a lost frame boundary.
