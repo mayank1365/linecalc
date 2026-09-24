@@ -1,90 +1,105 @@
 # Submission
 
 **Mayank Gupta · 23BCS10069 · mayank.23bcs10069@sst.scaler.com**
-Network Architecture — *Build a calculator that stays on the line*
 
-Build and verify everything:
+## 1. Project
+
+- **Repository:** linecalc
+- **Language:** Java 17
+- **Dependencies/frameworks:** None (JUnit 5 is test-scope only)
+- **Build tool:** Maven
+
+## 2. What Was Implemented
+
+### Track 1 — Persistent HTTP Calculator
+
+| Requirement | Status | Where |
+|---|---|---|
+| TCP server | Done | `server/HttpCalcServer.java` |
+| HTTP/1.1-style request parsing | Done | `protocol/HttpRequestParser.java` |
+| ADD, SUB, MUL, DIV | Done | `calculator/Operation.java` |
+| 400 handling | Done | bad operand, division by zero, missing `Host` |
+| 404 handling | Done | unknown path, e.g. `/pow` |
+| 405 handling | Done | `POST /add`, with `Allow: GET, HEAD` |
+| Content-Length based request framing | Done | `Bytes.readExactly` — exactly n octets, never n+1 |
+| Persistent TCP connection | Done | `server/HttpCalcConnection.java` |
+| Multiple requests over the same socket | Done | `tests/persistent_socket_check.py` |
+
+Optional extras, all implemented: `Connection: close`, 30s idle timeout, chunked request
+decoding, pipelining.
+
+### Track 2 — Binary Protocol
+
+| Requirement | Status | Where |
+|---|---|---|
+| Custom binary request/response protocol | Done | `docs/SPEC.md` |
+| Fixed-size frame header | Done | 8 octets — length 24, type 8, flags 8, R 1, stream 23 |
+| Length-prefixed payloads | Done | `protocol/FrameCodec.java`, `protocol/HeaderCodec.java` |
+| Binary file server (`bserve`) | Done | `server/BinaryServer.java` |
+| Binary client (`bcurl`) | Done | `client/BinaryClient.java` |
+| 400 malformed-frame handling | Done | `FrameCodec.read`, `HeaderCodec.decode` |
+| 404 file-not-found handling | Done | `server/FileStore.java` (plus 403 for root escapes) |
+| Unknown frame type skipping | Done | `FrameCodec.read` / `readKnown` |
+| Persistent connections | Done | server keeps serving; `bcurl` never opens a second socket |
+
+Header names are numbered against a ten-entry static table; anything outside it is sent as a
+length-prefixed literal.
+
+## 3. Running
 
 ```bash
-mvn -q package                            # 130 tests
-./httpcalc 8080 &                         # part 1
-python3 tests/persistent_socket_check.py  # the marking procedure, reproduced
-./bserve ./www 9000 &                     # part 2
-./bcurl -v localhost:9000/index.html      # body to stdout, hexdump to stderr
+mvn -q package                          # build
+
+./httpcalc 8080                         # Track 1
+curl "http://localhost:8080/add?a=2&b=3"
+
+./bserve ./www 9000                     # Track 2
+./bcurl -v localhost:9000/index.html
 ```
 
----
+## 4. Testing
 
-## Page 1 — the persistent calculator
+```bash
+mvn -o test                                 # 130 JUnit tests, all passing
+python3 tests/persistent_socket_check.py    # the marking procedure
+```
 
-| Required | Where |
-|---|---|
-| Any language, no framework, just a socket | Java 17, `java.net.Socket` only. JUnit is test-scope. |
-| `GET /add?a=2&b=3` → `200 5` | `HttpCalcConnection.handle` |
-| `GET /sub?a=10&b=4` → `200 6` | same |
-| `GET /mul?a=6&b=7` → `200 42` | same |
-| `GET /div?a=9&b=3` → `200 3` | same |
-| `GET /div?a=1&b=0` → `400` | `Operation.DIV` |
-| `GET /add?a=x&b=3` → `400` | `Calculator.operand` |
-| `GET /pow?a=2&b=8` → `404` | path checked before method |
-| `POST /add` → `405` | `Allow: GET, HEAD`, body still drained |
-| `GET /add` with no `Host` → `400` | `HttpRequestParser`, framing intact so the connection survives |
-| **One socket, every request, still open** | `tests/persistent_socket_check.py`, `HttpCalcServerTest.oneSocketServesEveryRequestInTheAssignment` |
-| Consume exactly `Content-Length` and not one more | `HttpRequestParser` + `Bytes.readExactly`; pinned by `stopsOnTheLastBodyByteSoTheNextRequestIsIntact` |
-
-Optional stretch goals — **all four done**: `Connection: close`, a defended 30s idle timeout,
-chunked request decoding, and pipelining (all six written before any response is read).
-
-Observed output of the marking script:
+The marking script opens **one** socket, issues every request from the assignment, and reports:
 
 ```
 socket still open: True
 1 TCP handshake, 10 responses
 ```
 
-## Page 2 — the binary protocol
+## 5. Protocol
 
-| Required | Where |
-|---|---|
-| Track 1 — `./bserve ./www 9000` | `linecalc.server.BinaryServer` |
-| accept, read a frame, map path under a root, reply status + headers + bytes | `BinaryConnection`, `FileStore` |
-| `404` if it is not there | `FileStore.resolve` (plus `403` for escaping the root) |
-| `400` if the frame is malformed | `FrameCodec`, `HeaderCodec` |
-| and keep the connection open | `BinaryServerTest.keepsTheConnectionOpenAcrossManyRequests` |
-| Track 2 — `./bcurl -v localhost:9000/index.html` | `linecalc.client.BinaryClient` |
-| build the request frame, body to stdout, `-v` hexdumps every frame | body → stdout, diagnostics → stderr |
-| exit non-zero on 4xx / 5xx | `4` and `5`, distinguished |
-| **never open a second connection** | one `Socket` in `run()`; a second host is a usage error |
-| **Fixed-size frame header, fields and widths defended** | `docs/SPEC.md` §2.1, README "The frame header" |
-| **Number the ten names you send, length-prefix the rest** | `StaticTable`, `HeaderCodec` — HPACK's first two mechanisms |
-| **Unknown frame type MUST be skipped cleanly** | `FrameCodec.read`/`readKnown`; `FrameCodecTest.skipsAnUnknownFrameTypeCleanlyAndKeepsReading`, `BinaryServerTest.skipsUnknownFrameTypesAndKeepsServing` |
+See:
 
-### What you hand in
+- `docs/SPEC.md` — the complete wire format, including a conformance checklist
+- `docs/annotated-frame.md` — one complete request and response, every octet annotated
 
-1. **The spec, enough for a stranger** — [`docs/SPEC.md`](docs/SPEC.md), nine sections
-   including a conformance checklist.
-2. **The program** — `bserve` and `bcurl`, plus `httpcalc` for page 1.
-3. **An annotated hexdump of one complete request and response** —
-   [`docs/annotated-frame.md`](docs/annotated-frame.md), every octet, with the field arithmetic
-   checked against the declared lengths.
+## 6. Example
 
----
+Request (`GET /hello.txt`), as sent by `bcurl`:
 
-## The header widths, in one paragraph
+```
+0000  00 00 30 01 01 00 00 01  01 00 03 47 45 54 02 00  |..0........GET..|
+0010  0a 2f 68 65 6c 6c 6f 2e  74 78 74 04 00 0e 6c 6f  |./hello.txt...lo|
+0020  63 61 6c 68 6f 73 74 3a  39 30 30 30 07 00 09 62  |calhost:9000...b|
+0030  63 75 72 6c 2f 31 2e 30                           |curl/1.0|
+```
 
-HTTP/2 chose 24 / 8 / 8 / 1+31 and landed on a nine-octet header. Nine straddles every
-alignment boundary, so the header never loads as an aligned machine word. LCB/1 keeps the
-first three fields and spends **23** bits on the stream id instead of 31, giving a header of
-exactly **eight** octets. The cost is a ceiling of 8.4M never-reused stream ids per
-connection — about two and a half hours at 1,000 requests per second, after which a client
-opens a new connection. Full argument in `docs/SPEC.md` §2.1.
+`00 00 30` = payload length 48 · `01` = `REQUEST` · `01` = `END_MESSAGE` · `00 00 01` = stream 1.
+Then the header block: `01` → `:method` = `GET`, `02` → `:path` = `/hello.txt`,
+`04` → `host` = `localhost:9000`, `07` → `user-agent` = `bcurl/1.0`.
 
-## The line that may not be skipped
+Response — a `RESPONSE` frame carrying the status and headers, then a `DATA` frame carrying the
+body with `END_MESSAGE` set:
 
-> A receiver meeting a frame type it does not understand MUST discard exactly `Length` octets
-> and continue.
+```
+0000  00 00 5d 02 00 00 00 01  03 00 03 32 30 30 ...    |..]........200..|   RESPONSE
+0000  00 00 0f 03 01 00 00 01  68 65 6c 6c 6f 2c 20 66  |........hello, f|   DATA
+0010  72 61 6d 69 6e 67 0a                              |raming.|
+```
 
-The length prefix sits at a fixed offset in every frame, understood or not, so a receiver can
-always find a frame's end without knowing its meaning. That is what lets a version 2 ship
-without upgrading every peer on the same day — and it is why the reserved bit and the
-undefined flag bits are specified as *ignored* rather than *invalid*.
+Full annotation in `docs/annotated-frame.md`.

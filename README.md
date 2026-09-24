@@ -1,139 +1,83 @@
-# linecalc
+# LineCalc
 
-**Network Architecture assignment — "Build a calculator that stays on the line"**
-Mayank Gupta · 23BCS10069 · mayank.23bcs10069@sst.scaler.com
+A persistent HTTP/1.1 calculator and a custom binary HTTP-like protocol, written directly on
+TCP sockets with no web framework.
 
-Two exercises in one repository, joined by a single idea: **when a connection stays open, you
-have to say where each message ends.**
+## Overview
 
-| | Part | What it is | Command |
-|---|---|---|---|
-| 1 | **Persistent HTTP/1.1 calculator** | One TCP connection, many requests, framed by `Content-Length` | `./httpcalc 8080` |
-| 2 | **LCB/1 — a binary HTTP-like protocol** | Fixed 8-octet frame header, length-prefixed everything, server + client | `./bserve ./www 9000`, `./bcurl -v localhost:9000/index.html` |
+Both halves of this project demonstrate the same four things:
 
-Java 17, Maven, **no web framework** — `java.net.Socket` and `java.io` only. The single
-non-production dependency is JUnit 5.
+- **TCP sockets** — `java.net.Socket` and `java.io` only, no framework
+- **Persistent connections** — one TCP handshake serves many requests
+- **Request framing** — where one message ends and the next begins, derived rather than
+  guessed
+- **A custom binary protocol** — a fixed-size frame header with length-prefixed payloads
 
----
+The second point is what forces the third. While a connection closes after every response,
+"where does this message end?" is answered for free, at EOF. Once the connection stays open
+you have to say so explicitly — with `Content-Length` in Track 1, and with a 24-bit length
+field in Track 2.
 
-## Table of contents
+## Architecture
 
-- [Quick start](#quick-start)
-- [Part 1 — the persistent calculator](#part-1--the-persistent-calculator)
-- [Part 2 — LCB/1, the binary protocol](#part-2--lcb1-the-binary-protocol)
-- [Repository layout](#repository-layout)
-- [Testing](#testing)
-- [Design decisions, and why](#design-decisions-and-why)
-- [Limits and what a version 2 would add](#limits-and-what-a-version-2-would-add)
+```
+                 Track 1                             Track 2
 
----
-
-## Quick start
-
-```bash
-mvn -q package          # compiles and runs all 130 tests
+              bcurl / curl                            bcurl
+                   |                                    |
+            one TCP socket                       one TCP socket
+                   |                                    |
+             HttpCalcServer                       BinaryServer
+                   |                                    |
+          HttpRequestParser                         FrameCodec
+       (read exactly Content-Length)          (read exactly Length)
+                   |                                    |
+               Calculator                           HeaderCodec
+                   |                                    |
+              HttpResponse                          FileStore
+                   |                                    |
+             status + headers                    RESPONSE + DATA frames
+                   |                                    |
+                   +--------- same socket ---------------+
+                               (stays open)
 ```
 
-Then either half:
+## Features
 
-```bash
-# Part 1 — the calculator
-./httpcalc 8080 &
-curl "http://localhost:8080/add?a=2&b=3"        # -> 5
-python3 tests/persistent_socket_check.py 8080   # the marking procedure, reproduced
+### HTTP Calculator
 
-# Part 2 — the binary protocol
-./bserve ./www 9000 &
-./bcurl -v localhost:9000/index.html            # body to stdout, hexdumps to stderr
-```
+`./httpcalc [port]` — default **8080**. Operands are 64-bit signed integers.
 
-The three wrapper scripts (`httpcalc`, `bserve`, `bcurl`) just put `target/classes` on the
-classpath and pick a main class; run `mvn package` first and they will tell you if you forgot.
+| Request | Status | Body |
+|---|---|---|
+| `GET /add?a=2&b=3` | `200` | `5` |
+| `GET /sub?a=10&b=4` | `200` | `6` |
+| `GET /mul?a=6&b=7` | `200` | `42` |
+| `GET /div?a=9&b=3` | `200` | `3` |
+| `GET /div?a=1&b=0` | `400` | division by zero |
+| `GET /add?a=x&b=3` | `400` | operand is not an integer |
+| `GET /pow?a=2&b=8` | `404` | no such operation |
+| `POST /add` | `405` | `Allow: GET, HEAD` |
+| `GET /add` *(no `Host`)* | `400` | HTTP/1.1 requires `Host` |
 
----
+- **Persistent connection** — every request above can be served on one socket, which is still
+  open afterwards
+- **`Content-Length` framing** — the head is read one byte at a time, the body as exactly
+  `Content-Length` octets, and never one more
+- **`Connection: close`** honoured, with the HTTP/1.0 default inverted
+- **Chunked** request bodies decoded
+- **Pipelining** — all six requests may be written before any response is read; answers come
+  back in order
+- **30s idle timeout**, then a silent close
 
-## Part 1 — the persistent calculator
+Success bodies are the bare number with no trailing newline, so they can be compared byte for
+byte.
 
-### Endpoints
+### Binary Protocol (LCB/1)
 
-`./httpcalc [port]`, default **8080**. Operands are 64-bit signed integers.
+`./bserve <root> [port]` and `./bcurl [-v] [-I] <host:port/path>` — default port **9000**.
 
-| Request | Status | Body | Why |
-|---|---|---|---|
-| `GET /add?a=2&b=3` | `200` | `5` | |
-| `GET /sub?a=10&b=4` | `200` | `6` | |
-| `GET /mul?a=6&b=7` | `200` | `42` | |
-| `GET /div?a=9&b=3` | `200` | `3` | Integer division, truncated toward zero |
-| `GET /div?a=1&b=0` | `400` | | Division by zero is not a computation |
-| `GET /add?a=x&b=3` | `400` | | `x` is not an integer |
-| `GET /pow?a=2&b=8` | `404` | | No such operation |
-| `POST /add` | `405` | | Path exists, method does not (`Allow: GET, HEAD`) |
-| `GET /add` *(no `Host`)* | `400` | | HTTP/1.1 requires `Host` |
-
-Success bodies are the bare number with **no trailing newline**, so a client can compare them
-byte for byte. Error bodies are a short `text/plain` explanation.
-
-Overflow is a `400` rather than a silent wraparound: `add?a=9223372036854775807&b=1` has no
-64-bit answer, and quietly returning `-9223372036854775808` would be a wrong answer dressed as
-a right one.
-
-### The part that is actually hard
-
-HTTP/1.0 could answer *"where does this request end?"* with *"at EOF"* — the close told you,
-for free. Keeping the connection open takes that away, and the boundary has to be derived
-instead. Get it wrong by one byte and byte n+1, which belongs to the next request, is parsed
-as though it were part of this one.
-
-So `HttpRequestParser` never reads ahead:
-
-- the request line and headers are read **one byte at a time** until CRLF. Any bulk read could
-  pull body octets — or the first octets of a pipelined request — into a private buffer where
-  the next parse will not find them;
-- the body is then read as **exactly `Content-Length` octets** via `Bytes.readExactly`, or
-  decoded chunk by chunk for `Transfer-Encoding: chunked`;
-- the stream is created **once per connection** and reused across every request on it. Building
-  a fresh `BufferedInputStream` per request is the classic way to silently drop pipelined bytes
-  that are already buffered.
-
-A body is drained even when the response ignores it. `POST /add` answers `405` without looking
-at the body, but the octets are still consumed — otherwise they would be read as the next
-request line. `HttpCalcServerTest.postBodyIsDrainedSoTheNextRequestIsNotCorrupted` pins this.
-
-### Optional extras, all implemented
-
-| Stretch goal | Status |
-|---|---|
-| `Connection: close` | Honoured, and answered with `Connection: close` before closing. HTTP/1.0 gets the inverse default — close unless `Connection: keep-alive`. |
-| Idle timeout | 30s via `SO_TIMEOUT`, then a silent close. |
-| Chunked encoding | Decoded on requests, including chunk extensions and the trailer section. |
-| Pipelining | All six requests can be written before any response is read; answers come back in order. |
-
-**Defending the idle timeout.** Something must bound it, or one idle client holds a thread and
-a file descriptor forever — a denial of service you inflicted on yourself. 30s sits between
-Apache's 5s and nginx's 75s. The close is *silent* rather than a `408`: a client that has not
-started a request has no outstanding read to see the status line with, and one that is
-mid-request will see the close and retry, which is what RFC 9112 §9.6 tells it to do anyway.
-
-**Framing lost vs. framing intact.** Not every `400` is equal, and `HttpException` carries the
-difference:
-
-- *Framing intact* — the request was fully read before we objected (a missing `Host`, a bad
-  operand). We answer and **keep the connection open**.
-- *Framing lost* — we failed mid-head, so we no longer know where this request stops. We answer
-  and **close**, because guessing would corrupt whatever comes next.
-
-`Content-Length` and `Transfer-Encoding` arriving together is a flat `400`. Two different
-answers to "where does this end" is the request-smuggling primitive, not an ambiguity to be
-resolved by preferring one.
-
----
-
-## Part 2 — LCB/1, the binary protocol
-
-Full wire format: **[`docs/SPEC.md`](docs/SPEC.md)**.
-Every octet of one exchange: **[`docs/annotated-frame.md`](docs/annotated-frame.md)**.
-
-### The frame header
+Every frame is an 8-octet header followed by exactly `Length` octets:
 
 ```
  0                   1                   2                   3
@@ -146,249 +90,184 @@ Every octet of one exchange: **[`docs/annotated-frame.md`](docs/annotated-frame.
 |                    Payload (Length octets)                    ...
 ```
 
-**Eight octets — and the widths are the assignment's actual question.** HTTP/2 chose
-24 / 8 / 8 / 1+31, which totals nine. Nine is the one size in that neighbourhood with no
-redeeming property: every header after the first straddles an 8-octet boundary, so it never
-loads as an aligned machine word and a struct mapped over it needs explicit packing. Keeping
-HTTP/2's first three fields and spending **23** bits on the stream id instead of 31 buys a
-header of exactly eight octets.
-
-| Field | Width | Defence |
+| Type | Name | Direction |
 |---|---|---|
-| Length | 24 | 16 bits caps a frame at 64 KiB and shatters a large response into thousands of frames. 32 bits lets a stranger announce a 4 GiB allocation in the first four octets it ever sends. 24 is the compromise — then a *policy* cap of 64 KiB sits far below the structural one. |
-| Type | 8 | Four used, 252 left as the version-2 budget. The skip rule below is what makes that budget spendable. |
-| Flags | 8 | One used (`END_MESSAGE`, reused as `ACK` on `PING`). A per-frame boolean that would otherwise cost a payload octet and a parse step. |
-| R | 1 | Reserved **and specified as ignored**. A bit receivers must ignore is a bit a later version can use; a bit version 1 validated strictly would be permanently dead. |
-| Stream ID | 23 | 8.4M ids per connection. Ids are never reused, so this is a budget, not a concurrency ceiling — 1,000 req/s exhausts it in ~2h20m, then you open a new connection. Cheap price for the aligned header. |
+| `0x01` | `REQUEST` | client → server |
+| `0x02` | `RESPONSE` | server → client |
+| `0x03` | `DATA` | server → client |
+| `0x04` | `PING` | either |
 
-### Frame types
+- **Custom frame format** — fixed 8-octet header; the field widths are defended in
+  `docs/SPEC.md` §2.1
+- **Length-prefixed payloads** — the 24-bit length is at a fixed offset in every frame
+- **Header compression** — ten header names are numbered, everything else is a
+  length-prefixed literal
+- **File serving** — paths map under a document root, with `403` for anything escaping it
+- **Persistent connection** — the server keeps serving, and `bcurl` never opens a second
+  socket
+- **Unknown frame types are skipped cleanly** — a receiver discards exactly `Length` octets
+  and carries on rather than failing
+- **`400`** for a malformed frame, **`404`** for a missing file, **`405`** for a method other
+  than `GET`/`HEAD`
 
-| Code | Name | Direction | Payload |
-|---|---|---|---|
-| `0x01` | `REQUEST` | client → server | Header block |
-| `0x02` | `RESPONSE` | server → client | Header block |
-| `0x03` | `DATA` | server → client | Body octets |
-| `0x04` | `PING` | either | 0–8 opaque octets, echoed with `ACK` |
+`bcurl` exit codes: `0` on 2xx, `4` on 4xx, `5` on 5xx, `2` on usage, `1` on transport error.
+The body goes to stdout and every diagnostic to stderr, so `./bcurl host:9000/f > f` works.
 
-### Header compression — HPACK's first two mechanisms
-
-Ten names are numbered, so `content-length` costs **one octet instead of fifteen**. Anything
-else travels as a length-prefixed literal, so the table being short costs bytes and never
-correctness.
-
-```
-+---------------+
-|  Name code (8)|   1..10 = static table index,  0 = a literal name follows
-+---------------+
-| Name len (8)  |   \  only when the code is 0
-| Name (len)    |   /
-+---------------+
-| Value len(16) |   always
-| Value (len)   |
-+---------------+
-```
-
-There is no field count — the block runs to the end of the payload, whose length the frame
-header already stated. A count would be a second source of truth about one fact, and two
-sources of truth can disagree.
-
-`:status` travels as ASCII `"200"`, not a 16-bit integer. That costs two octets and buys the
-rule that *every* value is a length-prefixed byte string, so a reader can step over any field
-without knowing what it is.
-
-**Not implemented, deliberately:** HPACK's dynamic table. It is where the real compression
-ratio lives, and also where HPACK gets hard — both peers must evolve byte-identical tables in
-lockstep, and it is what made CRIME-style attacks possible. Version 1 stays stateless.
-
-### The one line that may not be skipped
-
-> A receiver meeting a frame type it does not understand **MUST** discard exactly `Length`
-> octets and carry on — not close, not error, not guess.
-
-This is the difference between a protocol and a format. Because the length prefix sits at a
-fixed offset in *every* frame, a receiver can always find a frame's end without understanding
-its meaning, so a version-2 peer can talk to a version-1 peer and be stepped over politely
-instead of killing the connection. Without it, every extension is a flag day.
-
-The same reasoning is why `R` and undefined flag bits are specified as **ignored** rather than
-invalid: strict validation of a field nobody uses yet is a decision never to use it.
-
-Implemented in `FrameCodec` (`read` hands unknown frames back so they can be logged, `readKnown`
-drops them silently), exercised by `FrameCodecTest.skipsAnUnknownFrameTypeCleanlyAndKeepsReading`
-and, over a real socket, `BinaryServerTest.skipsUnknownFrameTypesAndKeepsServing`.
-
-### `bserve` — the server
-
-```
-./bserve <document-root> [port]          # default 9000
-```
-
-Accepts a connection, reads the 4-octet `LCB1` preface, then serves frames until the peer
-leaves. Maps `:path` to a file under the root, replies with a `RESPONSE` frame and then `DATA`
-frames of 16 KiB, and **keeps the connection open**.
-
-| Status | When |
-|---|---|
-| `200` | Found and sent |
-| `400` | Malformed frame or header block, bad stream id, `REQUEST` without `END_MESSAGE` |
-| `403` | Path escapes the document root |
-| `404` | No such file, or a dotfile |
-| `405` | Method is not `GET` or `HEAD` |
-| `500` | Failed while reading a file it had already found |
-
-Path containment is checked **structurally**: normalise, then resolve symlinks, then ask
-whether the result is still under the root. Filtering the raw path for `".."` is what everyone
-reaches for first and it loses to percent-encoding, to `....//`, and to a symlink inside the
-root pointing out of it.
-
-### `bcurl` — the client
-
-```
-./bcurl [-v] [-I] <host:port/path> [more paths on the same host...]
-  -v   hexdump every frame, both directions (stderr)
-  -I   send HEAD instead of GET
-```
-
-| Exit | Meaning |
-|---|---|
-| `0` | 2xx |
-| `1` | Transport or protocol error |
-| `2` | Usage error |
-| `4` | 4xx |
-| `5` | 5xx |
-
-`4` and `5` are distinguished rather than both being `1`, so a script can tell "I asked for the
-wrong thing" from "the server broke".
-
-**"Never open a second connection" is structural, not promised.** `run()` opens exactly one
-`Socket`; every URL on the command line goes down it on its own odd, increasing stream id. A
-URL naming a different host or port is a *usage error*, not a second dial:
-
-```console
-$ ./bcurl localhost:9000/a.html localhost:9001/b.html
-bcurl: localhost:9001 is not localhost:9000; that would need a second connection,
-       which this client does not open
-```
-
-The body goes to **stdout** and every diagnostic to **stderr**, so
-`./bcurl host:9000/photo.png > photo.png` writes the file and not the file plus commentary.
-
----
-
-## Repository layout
+## Project Structure
 
 ```
 linecalc/
 ├── src/main/java/linecalc/
-│   ├── server/      HttpCalcServer + Connection   (part 1)
-│   │                BinaryServer + Connection, FileStore  (part 2, bserve)
-│   ├── client/      BinaryClient                  (part 2, bcurl)
-│   ├── protocol/    Http{Request,Response,RequestParser,Exception}   — HTTP/1.1
-│   │                Frame, FrameType, FrameCodec                     — LCB/1 framing
-│   │                HeaderCodec, HeaderField, StaticTable            — LCB/1 headers
-│   ├── calculator/  Calculator, Operation, CalcException  (no sockets in here)
-│   └── common/      Bytes (readExactly / skipExactly), Hex, Log
+│   ├── server/       HttpCalcServer, BinaryServer, FileStore
+│   ├── client/       BinaryClient (bcurl)
+│   ├── protocol/     HTTP/1.1 messages; LCB/1 frames and header blocks
+│   ├── calculator/   arithmetic, with no knowledge of sockets
+│   └── common/       Bytes (readExactly / skipExactly), Hex, Log
 ├── tests/
-│   ├── java/linecalc/…            130 JUnit 5 tests
-│   └── persistent_socket_check.py the marking procedure, reproduced
-├── www/                           document root for bserve
+│   ├── java/                        130 JUnit 5 tests
+│   └── persistent_socket_check.py   the assignment's marking procedure
+├── www/                             document root for bserve
 ├── docs/
-│   ├── SPEC.md                    the LCB/1 wire format, for a stranger
-│   └── annotated-frame.md         one exchange, every octet annotated
-├── httpcalc, bserve, bcurl        wrapper scripts
+│   ├── SPEC.md                      the LCB/1 wire format
+│   └── annotated-frame.md           one exchange, every octet annotated
+├── httpcalc, bserve, bcurl          launcher scripts
+├── README.md
+├── SUBMISSION.md
 └── pom.xml
 ```
 
-`calculator/` knows nothing about sockets, headers or status codes — the arithmetic is not the
-point of the assignment, so it stays behind one pure function and gets out of the way.
+## Build
 
----
+```bash
+mvn -q package
+```
+
+Java 17, Maven, no runtime dependencies. Run this before the scripts below — they put
+`target/classes` on the classpath.
+
+## Run
+
+### Calculator Server
+
+```bash
+./httpcalc 8080
+```
+
+### Binary Server
+
+```bash
+./bserve ./www 9000
+```
+
+### Binary Client
+
+```bash
+./bcurl -v localhost:9000/index.html
+```
+
+`-v` hexdumps every frame in both directions; `-I` sends `HEAD` instead of `GET`.
+
+## Examples
+
+### Calculator, two requests on one socket
+
+```console
+$ ./httpcalc 8080 &
+$ curl "http://localhost:8080/add?a=2&b=3"
+5
+$ curl "http://localhost:8080/div?a=1&b=0" -o /dev/null -w '%{http_code}\n'
+400
+```
+
+Request and response on the wire:
+
+```http
+GET /add?a=2&b=3 HTTP/1.1
+Host: localhost:8080
+
+HTTP/1.1 200 OK
+Date: Mon, 21 Sep 2026 18:46:48 GMT
+Server: linecalc/1.0
+Content-Type: text/plain; charset=utf-8
+Connection: keep-alive
+Keep-Alive: timeout=30
+Content-Length: 1
+
+5
+```
+
+### Binary protocol
+
+```console
+$ ./bserve ./www 9000 &
+$ ./bcurl -v localhost:9000/hello.txt
+> REQUEST len=48 flags=0x01 stream=1
+>   :method: GET
+>   :path: /hello.txt
+>   host: localhost:9000
+0000  00 00 30 01 01 00 00 01  01 00 03 47 45 54 02 00  |..0........GET..|
+0010  0a 2f 68 65 6c 6c 6f 2e  74 78 74 04 00 0e 6c 6f  |./hello.txt...lo|
+...
+< RESPONSE len=93 flags=0x00 stream=1
+<   :status: 200
+<   content-type: text/plain; charset=utf-8
+<   content-length: 15
+< DATA len=15 flags=0x01 stream=1
+0000  00 00 0f 03 01 00 00 01  68 65 6c 6c 6f 2c 20 66  |........hello, f|
+0010  72 61 6d 69 6e 67 0a                              |raming.|
+hello, framing
+```
+
+Reading the request header: `00 00 30` is a payload length of 48, `01` is `REQUEST`, `01` is
+`END_MESSAGE`, and `00 00 01` is stream 1 with the reserved bit clear. Every octet of this
+exchange is broken down in `docs/annotated-frame.md`.
+
+Several paths on **one** connection:
+
+```console
+$ ./bcurl localhost:9000/index.html localhost:9000/hello.txt
+```
+
+A URL naming a different host or port is a usage error rather than a second connection.
 
 ## Testing
 
 ```bash
-mvn -o test                              # 130 JUnit tests
-python3 tests/persistent_socket_check.py # the assignment's own marking procedure
+mvn -o test                                 # 130 JUnit tests
+python3 tests/persistent_socket_check.py    # the assignment's marking procedure
 ```
 
-Tests live in `tests/java/` rather than `src/test/java/`, so `pom.xml` points
-`testSourceDirectory` there.
+Tests live in `tests/java/`, so `pom.xml` points `testSourceDirectory` there.
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `CalculatorTest` | 8 | Arithmetic, division by zero, non-integers, overflow, path mapping |
-| `HttpRequestParserTest` | 13 | Exact `Content-Length` framing, pipelining, chunked, `Host`, smuggling, malformed heads |
-| `HttpCalcServerTest` | 8 | All nine assignment cases on **one socket**, pipelining, body draining, `Connection: close`, `HEAD` |
-| `FrameCodecTest` | 12 | Header layout, **unknown-type skipping**, ignored reserved bit and flags, oversize skip, truncation |
-| `HeaderCodecTest` | 15 | Static indices, literals, UTF-8, round-trips, every malformed-block case |
-| `BinaryServerTest` | 16 | End-to-end over a socket: 200/400/403/404/405, **skip-and-keep-serving**, stream ids, `PING`, `HEAD`, multi-frame bodies, bad preface |
-| `FileStoreTest` | 12 | Path containment directly: `..` in every spelling, **symlinks pointing out of the root**, dotfiles, content types |
-| `HttpResponseTest` | 10 | Status line, CRLF, `Content-Length` in octets not characters, IMF-fixdate, `HEAD` |
-| `BytesTest` | 11 | `readExactly` across short reads, `skipExactly` past its sink buffer, unsigned widths at their boundaries |
-| `HexTest` | 7 | Row splitting, alignment, non-printable substitution — the hexdump is itself a deliverable |
-| `BinaryClientTest` | 7 | URL parsing, default port, endpoint comparison |
-| `InteropTest` | 11 | **The real client against the real server**: multi-request connections, exit codes, reassembly, 12 concurrent clients |
+| `CalculatorTest` | 8 | Arithmetic, division by zero, non-integers, overflow |
+| `HttpRequestParserTest` | 13 | `Content-Length` framing, pipelining, chunked, `Host` |
+| `HttpCalcServerTest` | 8 | All nine cases on one socket, pipelining, body draining |
+| `HttpResponseTest` | 10 | Status line, CRLF, `Content-Length` in octets, `HEAD` |
+| `FrameCodecTest` | 12 | Header layout, unknown-type skipping, truncation |
+| `HeaderCodecTest` | 15 | Static indices, literals, UTF-8, malformed blocks |
+| `BinaryServerTest` | 16 | 200/400/403/404/405 over a socket, stream ids, `PING` |
+| `FileStoreTest` | 12 | Path containment, symlink escapes, dotfiles |
+| `BinaryClientTest` | 7 | URL parsing, endpoint comparison |
+| `InteropTest` | 11 | The real client against the real server; 12 concurrent clients |
+| `BytesTest` | 11 | `readExactly` across short reads, `skipExactly`, unsigned widths |
+| `HexTest` | 7 | Hexdump row splitting and alignment |
 
-Every suite above drives one side with a hand-built peer, which only proves each side matches
-*my* reading of the spec. `InteropTest` runs the actual `bcurl` against the actual `bserve`,
-which is the claim that matters to anyone writing a third implementation.
-
-`persistent_socket_check.py` is the grading script from the assignment, written out literally —
-one `socket.create_connection`, every request, and then:
+`persistent_socket_check.py` reproduces the marking procedure — one
+`socket.create_connection`, every request from the assignment, and then:
 
 ```
 socket still open: True
 1 TCP handshake, 10 responses
 ```
 
----
+## Protocol
 
-## Design decisions, and why
+For the complete protocol specification:
 
-**Framing is a property of the connection, not the message.** Both halves of this repository
-are the same program written twice. HTTP/1.1 puts the length in a header you have to find by
-scanning for a blank line; LCB/1 puts it in a fixed 24-bit field you cannot miss. That is the
-entire difference, and it is why HTTP/1.1 has a request-smuggling literature and HTTP/2 does
-not.
+**[`docs/SPEC.md`](docs/SPEC.md)**
 
-**Two kinds of error, everywhere.** Both `HttpException` and `ProtocolException` carry
-`framingIntact()`. A failure that leaves the stream aligned is answered and survived; a failure
-that loses the boundary is answered and closed. Collapsing these into "it's a 400" either
-closes connections that were fine or keeps reading a stream that is now garbage being parsed
-as structure.
+For the annotated real request/response:
 
-**Reserved fields are specified as ignored, not validated.** `R` and the undefined flag bits
-MUST be ignored on receipt. This is the only thing that keeps them available to a version 2 —
-a peer that rejects unknown bits today is a peer that must be upgraded before anyone can use
-them tomorrow.
-
-**Limits are policy, not structure.** The 24-bit length field permits 16 MiB; version 1
-accepts 64 KiB. The structural maximum is what the format can express, the policy maximum is
-what we are willing to allocate for a stranger, and they should not be the same number.
-
-**Stream ids exist before multiplexing does.** Version 1 sends one request at a time, so the
-field does nothing yet. It is there because retrofitting request/response correlation onto a
-protocol that assumed strict ordering is precisely the mistake HTTP/1.1 pipelining made, and
-it cost the web fifteen years of head-of-line blocking.
-
----
-
-## Limits and what a version 2 would add
-
-Version 1 is deliberately small. Known limits, all of them chosen rather than overlooked:
-
-- **Not multiplexed.** One request in flight per connection. The stream id is already on the
-  wire, so interleaving is an implementation change, not a format change.
-- **No request bodies.** `REQUEST` must set `END_MESSAGE`. `POST` needs client-to-server `DATA`
-  frames, which is a version-2 job.
-- **No dynamic header table.** See above — stateless by choice.
-- **No flow control.** A server can outrun a slow client until the kernel buffer pushes back.
-  HTTP/2 spends a whole frame type (`WINDOW_UPDATE`) on this; version 1 has a spare type code
-  and the room to add it.
-- **No TLS.** Out of scope for the assignment.
-- **Whole files are read into memory** before the first `DATA` frame goes out. Fine for a
-  document root of web pages, wrong for large files; streaming would change `BinaryConnection`
-  and nothing about the wire format.
-
-A version 2 can add any of these without breaking a version-1 peer, because of exactly one
-sentence in the spec: a receiver meeting a frame type it does not know skips it cleanly.
+**[`docs/annotated-frame.md`](docs/annotated-frame.md)**
