@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -18,8 +19,14 @@ import java.util.Map;
  */
 public final class HttpResponse {
 
+    /**
+     * RFC 9110 IMF-fixdate. The locale is pinned to US deliberately: the format demands the
+     * English three-letter month, and a JVM defaulting to (say) en_IN renders September as
+     * "Sept", which is four letters and not a valid HTTP-date.
+     */
     private static final DateTimeFormatter IMF_FIXDATE =
-            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'").withZone(ZoneOffset.UTC);
+            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+                    .withZone(ZoneOffset.UTC);
 
     private final int status;
     private final Map<String, String> headers = new LinkedHashMap<>();

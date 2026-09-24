@@ -31,7 +31,7 @@ non-production dependency is JUnit 5.
 ## Quick start
 
 ```bash
-mvn -q package          # compiles and runs all 72 tests
+mvn -q package          # compiles and runs all 130 tests
 ```
 
 Then either half:
@@ -289,7 +289,7 @@ linecalc/
 │   ├── calculator/  Calculator, Operation, CalcException  (no sockets in here)
 │   └── common/      Bytes (readExactly / skipExactly), Hex, Log
 ├── tests/
-│   ├── java/linecalc/…            72 JUnit 5 tests
+│   ├── java/linecalc/…            130 JUnit 5 tests
 │   └── persistent_socket_check.py the marking procedure, reproduced
 ├── www/                           document root for bserve
 ├── docs/
@@ -307,7 +307,7 @@ point of the assignment, so it stays behind one pure function and gets out of th
 ## Testing
 
 ```bash
-mvn -o test                              # 72 JUnit tests
+mvn -o test                              # 130 JUnit tests
 python3 tests/persistent_socket_check.py # the assignment's own marking procedure
 ```
 
@@ -322,6 +322,16 @@ Tests live in `tests/java/` rather than `src/test/java/`, so `pom.xml` points
 | `FrameCodecTest` | 12 | Header layout, **unknown-type skipping**, ignored reserved bit and flags, oversize skip, truncation |
 | `HeaderCodecTest` | 15 | Static indices, literals, UTF-8, round-trips, every malformed-block case |
 | `BinaryServerTest` | 16 | End-to-end over a socket: 200/400/403/404/405, **skip-and-keep-serving**, stream ids, `PING`, `HEAD`, multi-frame bodies, bad preface |
+| `FileStoreTest` | 12 | Path containment directly: `..` in every spelling, **symlinks pointing out of the root**, dotfiles, content types |
+| `HttpResponseTest` | 10 | Status line, CRLF, `Content-Length` in octets not characters, IMF-fixdate, `HEAD` |
+| `BytesTest` | 11 | `readExactly` across short reads, `skipExactly` past its sink buffer, unsigned widths at their boundaries |
+| `HexTest` | 7 | Row splitting, alignment, non-printable substitution — the hexdump is itself a deliverable |
+| `BinaryClientTest` | 7 | URL parsing, default port, endpoint comparison |
+| `InteropTest` | 11 | **The real client against the real server**: multi-request connections, exit codes, reassembly, 12 concurrent clients |
+
+Every suite above drives one side with a hand-built peer, which only proves each side matches
+*my* reading of the spec. `InteropTest` runs the actual `bcurl` against the actual `bserve`,
+which is the claim that matters to anyone writing a third implementation.
 
 `persistent_socket_check.py` is the grading script from the assignment, written out literally —
 one `socket.create_connection`, every request, and then:

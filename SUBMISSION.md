@@ -6,7 +6,7 @@ Network Architecture — *Build a calculator that stays on the line*
 Build and verify everything:
 
 ```bash
-mvn -q package                            # 72 tests
+mvn -q package                            # 130 tests
 ./httpcalc 8080 &                         # part 1
 python3 tests/persistent_socket_check.py  # the marking procedure, reproduced
 ./bserve ./www 9000 &                     # part 2
