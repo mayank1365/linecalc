@@ -98,7 +98,7 @@ Every frame is an 8-octet header followed by exactly `Length` octets:
 | `0x04` | `PING` | either |
 
 - **Custom frame format** — fixed 8-octet header; the field widths are defended in
-  `docs/SPEC.md` §2.1
+  `docs/design-notes.md`
 - **Length-prefixed payloads** — the 24-bit length is at a fixed offset in every frame
 - **Header compression** — ten header names are numbered, everything else is a
   length-prefixed literal
@@ -125,11 +125,14 @@ linecalc/
 │   └── common/       Bytes (readExactly / skipExactly), Hex, Log
 ├── tests/
 │   ├── java/                        130 JUnit 5 tests
-│   └── persistent_socket_check.py   the assignment's marking procedure
+│   ├── persistent_socket_check.py   the assignment's marking procedure
+│   └── conformance_check.py         LCB/1 tester written from the spec alone
 ├── www/                             document root for bserve
 ├── docs/
-│   ├── SPEC.md                      the LCB/1 wire format
-│   └── annotated-frame.md           one exchange, every octet annotated
+│   ├── SPEC.md                      the LCB/1 wire format, two pages
+│   ├── annotated-frame.md           one exchange, every octet annotated
+│   ├── design-notes.md              why the fields and widths are what they are
+│   └── conformance.md               checklist, and how to run the tester
 ├── httpcalc, bserve, bcurl          launcher scripts
 ├── README.md
 ├── SUBMISSION.md
@@ -235,6 +238,7 @@ A URL naming a different host or port is a usage error rather than a second conn
 ```bash
 mvn -o test                                 # 130 JUnit tests
 python3 tests/persistent_socket_check.py    # the assignment's marking procedure
+python3 tests/conformance_check.py          # LCB/1 conformance, from the spec alone
 ```
 
 Tests live in `tests/java/`, so `pom.xml` points `testSourceDirectory` there.
@@ -264,10 +268,13 @@ socket still open: True
 
 ## Protocol
 
-For the complete protocol specification:
+| Document | Answers |
+|---|---|
+| **[`docs/SPEC.md`](docs/SPEC.md)** | Exactly how the protocol works — the two-page wire format |
+| **[`docs/annotated-frame.md`](docs/annotated-frame.md)** | The actual bytes, and what every one of them means |
+| **[`docs/design-notes.md`](docs/design-notes.md)** | Why the fields and widths are what they are |
+| **[`docs/conformance.md`](docs/conformance.md)** | How to check an implementation against the spec |
 
-**[`docs/SPEC.md`](docs/SPEC.md)**
-
-For the annotated real request/response:
-
-**[`docs/annotated-frame.md`](docs/annotated-frame.md)**
+`tests/conformance_check.py` implements LCB/1 from `SPEC.md` alone, in Python, sharing no code
+with the Java. It currently passes **18/18** against `bserve` — which is the evidence that the
+spec is a contract rather than a description of this implementation.

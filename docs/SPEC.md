@@ -2,35 +2,27 @@
 
 **Version 1 · Mayank Gupta (23BCS10069)**
 
-An HTTP-shaped request/response protocol with a binary framing layer, carried over one
-long-lived TCP connection. A stranger holding this document should be able to write an
-interoperating peer without reading our source.
+A request/response protocol with a binary framing layer, over one long-lived TCP connection.
+This document is the contract: an implementation written from it alone must interoperate.
 
-Conventions: MUST, MUST NOT, SHOULD and MAY are used in the RFC 2119 sense. All integers are
-unsigned and big-endian (network byte order). "Octet" means 8 bits.
-
----
+MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. Integers are unsigned and big-endian.
+"Octet" means 8 bits. Rationale for the choices below is in `docs/design-notes.md`; the
+conformance checklist is in `docs/conformance.md`.
 
 ## 1. Connection
 
-A client opens one TCP connection and sends the 4-octet **preface** before anything else:
+The client sends a 4-octet preface before its first frame:
 
 ```
 4c 43 42 31        "LCB1"
 ```
 
-A server MUST read these four octets first. If they differ it MUST close the connection
-without replying: the peer is speaking some other protocol, and a reply would be noise at
-best. The preface costs four octets once per connection and turns an unbounded class of
-confusing parse failures into one unambiguous one. The trailing `1` is the protocol version;
-a future `LCB2` is distinguishable from the very first octets, before either side has
-committed to an interpretation of anything.
+A server MUST read these four octets first and MUST close without replying if they differ.
+The trailing `1` is the version, so `LCB2` is distinguishable from the first octet onward.
 
-After the preface both peers exchange frames until one closes. The connection is persistent by
-default. A client SHOULD reuse it for every request to the same host and port, and MUST NOT
-open a second connection merely because it has a second request.
-
----
+The connection is persistent. A client SHOULD reuse it for every request to the same host and
+port, and MUST NOT open a second connection merely because it has a second request. Either
+side may close; both MUST tolerate a close on any frame boundary.
 
 ## 2. Frame layout
 
@@ -45,56 +37,20 @@ Every frame is an 8-octet header followed by exactly `Length` octets of payload.
 |   Flags (8)   |R|                Stream ID (23)                 |
 +---------------+-+-----------------------------------------------+
 |                    Payload (Length octets)                    ...
-+---------------------------------------------------------------+
 ```
 
-| Field | Width | Notes |
+| Field | Width | Rule |
 |---|---|---|
-| Payload Length | 24 bits | Octets of payload that follow the header. Excludes the header. |
-| Type | 8 bits | See §3. Unknown values MUST be skipped, not rejected. |
-| Flags | 8 bits | Per-type booleans. Undefined flags MUST be sent as 0 and ignored on receipt. |
+| Payload Length | 24 bits | Octets following the header. Excludes the header itself. |
+| Type | 8 bits | §3. An unknown value MUST be skipped, not rejected (§4). |
+| Flags | 8 bits | §3. Undefined bits MUST be sent as 0 and MUST be ignored on receipt. |
 | R | 1 bit | Reserved. MUST be sent as 0 and MUST be ignored on receipt. |
-| Stream ID | 23 bits | Pairs a response with its request. See §5. |
+| Stream ID | 23 bits | §5. Mask off R before use. |
 
-### 2.1 Why these widths
-
-HTTP/2 chose 24 / 8 / 8 / 1+31, which totals nine octets. Nine is the one number in that
-neighbourhood with no redeeming property: every header after the first straddles an 8-octet
-boundary, so a parser can never load one as an aligned machine word and a `struct` mapped over
-it needs explicit packing. We keep HTTP/2's first three fields unchanged and spend 23 bits on
-the stream id instead of 31. That yields **exactly eight octets** — one aligned read, one
-cache-friendly struct — and the only thing given up is stream ids above 8,388,607.
-
-- **Length at 24 bits.** 16 bits would cap a frame at 64 KiB, forcing a 10 MB response into
-  160-odd frames and a header-parse per 64 KiB. 32 bits would let a peer announce a 4 GiB
-  allocation in the first four octets it ever sends. 24 bits (16 MiB) is the same compromise
-  HTTP/2 reached, and we then apply a *policy* cap far below the structural one (§2.2).
-- **Type at 8 bits.** Version 1 uses four codes. The remaining 252 are the extension budget,
-  and §4 is what makes that budget spendable.
-- **Flags at 8 bits.** One is defined. A flag is a per-frame boolean that would otherwise cost
-  a payload octet plus a parse step; having a byte of them costs nothing and keeps the
-  common case (`END_MESSAGE`) out of the payload entirely.
-- **R at 1 bit.** Reserved *and defined as ignored*. This matters more than it looks: a bit
-  that receivers are required to ignore is a bit a later version can actually use, because no
-  deployed peer rejects a frame for setting it. A bit that version 1 validated strictly would
-  be permanently unusable.
-- **Stream ID at 23 bits.** 8,388,607 request slots per connection. Ids are never reused
-  (§5), so this is a budget, not a ceiling on concurrency. A client issuing 1,000 requests per
-  second exhausts it in about 2h20m and then opens a fresh connection — an acceptable price
-  for the aligned header, given that version 1 is not even multiplexed.
-
-### 2.2 Size limits
-
-Structurally a peer may announce 16 MiB. Trusting that on the strength of three octets from a
-stranger means allocating 16 MiB per connection on demand, so:
-
-- A receiver MUST reject a frame whose `Length` exceeds **65,536**. It MUST do so by
-  discarding exactly `Length` octets (the length prefix is still trustworthy enough to
-  resynchronise with) and replying `400`, not by closing.
-- A sender MUST split a body larger than that across multiple `DATA` frames. The reference
-  implementation uses 16 KiB.
-
----
+**Size limit.** A receiver MUST reject a frame whose `Length` exceeds **65,536**. It MUST do so
+by discarding exactly `Length` octets — the length prefix is still trustworthy enough to
+resynchronise with — and replying `400`. It MUST NOT close. A sender MUST split a larger body
+across multiple `DATA` frames.
 
 ## 3. Frame types
 
@@ -105,83 +61,56 @@ stranger means allocating 16 MiB per connection on demand, so:
 | `0x03` | `DATA` | server → client | Raw body octets |
 | `0x04` | `PING` | either | 0–8 opaque octets |
 
-### Flags
-
 | Bit | Name | Applies to | Meaning |
 |---|---|---|---|
 | `0x01` | `END_MESSAGE` | `REQUEST`, `RESPONSE`, `DATA` | Last frame of this message. |
 | `0x01` | `ACK` | `PING` | This frame is an echo, not a new probe. |
 
-`END_MESSAGE` and `ACK` share a bit because they apply to disjoint frame types, so no frame is
-ever ambiguous. Flag bits are a scarce, non-renewable resource — there are eight of them and
-they are in every single frame — and spending two on what one can express would be waste.
+`END_MESSAGE` and `ACK` share a bit because they apply to disjoint frame types.
 
-### Per-type rules
-
-- **`REQUEST`** MUST set `END_MESSAGE`; version 1 has no request bodies. It MUST carry
+- **`REQUEST`** MUST set `END_MESSAGE` (version 1 has no request bodies) and MUST carry
   `:method`, `:path` and `host`. Its stream id MUST be odd and non-zero.
-- **`RESPONSE`** MUST carry `:status`. It sets `END_MESSAGE` only when no `DATA` follows
-  (a `HEAD` response, for instance).
-- **`DATA`** carries body octets on the stream id of the request it answers. The final one
-  MUST set `END_MESSAGE`; an empty body is one zero-length `DATA` with the flag set.
+- **`RESPONSE`** MUST carry `:status`. It sets `END_MESSAGE` only when no `DATA` follows — a
+  `HEAD` response, for instance.
+- **`DATA`** carries body octets on the stream id of the request it answers. The final one MUST
+  set `END_MESSAGE`. An empty body is one zero-length `DATA` with the flag set.
 - **`PING`** MUST use stream id 0 and MUST carry at most 8 octets. A receiver seeing a `PING`
   without `ACK` MUST reply with the identical payload and `ACK` set. A `PING` with `ACK` set
-  MUST NOT be answered, or two peers would ping each other forever.
+  MUST NOT be answered.
 
----
-
-## 4. Unknown frames — the rule you may not skip
+## 4. Unknown frames
 
 > **A receiver that encounters a frame type it does not understand MUST discard exactly
 > `Length` octets of payload and continue reading. It MUST NOT close the connection, MUST NOT
 > reply with an error, and MUST NOT attempt to interpret the payload.**
 
-This single sentence is the difference between a protocol and a format. Because the length
-prefix is universal and sits in a fixed position in every frame, a receiver can always
-determine a frame's size without understanding its meaning — so a version-2 peer can send
-version-2 frames to a version-1 peer and the version-1 peer will step over them correctly
-instead of dying. Without this rule, every extension is a flag day on which every deployed
-peer must be upgraded simultaneously.
-
-The same reasoning is why undefined flag bits and the `R` bit are defined as *ignored* rather
-than *invalid*: strict validation of a field nobody uses yet is a decision to never use it.
-
-An implementation MAY log that it skipped something. It MUST NOT let that change the bytes.
-
----
+Because the length prefix is universal and sits at a fixed offset, a receiver can always
+determine a frame's size without understanding its meaning. An implementation MAY log that it
+skipped something; it MUST NOT let that change the octets it reads.
 
 ## 5. Streams
 
 Every request/response exchange happens on one stream id.
 
-- Client-initiated ids are **odd**, starting at 1, and strictly increase. Even ids are
-  reserved for server-initiated exchanges, which version 1 does not have.
-- Id `0` is the connection itself, not a request: `PING` uses it, and nothing else may.
-- An id is **never reused** on a connection. Reuse invites a response to a cancelled request
-  being matched to its successor.
-- A server MUST answer on the id it received. A server receiving a `REQUEST` on an even id, on
-  id 0, or on an id not greater than one it has already seen MUST reply `400`.
+- Client-initiated ids are **odd**, start at 1, and strictly increase. Even ids are reserved
+  for server-initiated exchanges, which version 1 does not use.
+- Id `0` addresses the connection itself: `PING` uses it, nothing else may.
+- An id is **never reused** on a connection.
+- A server MUST answer on the id it received. A `REQUEST` on an even id, on id 0, or on an id
+  not greater than one already seen MUST be answered `400`.
 
-Version 1 is not multiplexed: a client sends one request and reads its response before
-sending the next. The field exists now because retrofitting request/response correlation onto
-a protocol that assumed strict ordering is exactly the mistake HTTP/1.1 pipelining made, and
-it cost the web fifteen years of head-of-line blocking.
-
----
+Version 1 is not multiplexed: a client sends one request and reads its response before sending
+the next.
 
 ## 6. Header blocks
 
 The payload of a `REQUEST` or `RESPONSE` is a sequence of header fields packed back to back.
-There is no field count: the block runs to the end of the payload, whose length the frame
-header already stated. A count would be a second source of truth about one fact, and two
-sources of truth can disagree.
-
-Each field:
+There is no field count — the block runs to the end of the payload, whose length the frame
+header already gave. Each field:
 
 ```
 +---------------+
-|  Name code (8)|   1..10 = static table index (§6.1)
-|               |   0     = a literal name follows
+|  Name code (8)|   1..10 = static table index,  0 = a literal name follows
 +---------------+
 | Name len (8)  |   \  present only when Name code == 0
 | Name (len)    |   /
@@ -191,16 +120,11 @@ Each field:
 +---------------+
 ```
 
-Names MUST be lowercase and MUST be valid HTTP tokens. Values are opaque UTF-8 octets, at most
-65,535 of them. Values are *always* length-prefixed, including `:status`, which travels as the
-ASCII string `"200"` and not as a 16-bit integer: special-casing it would save two octets and
-cost the uniform rule that any reader can find the end of any field without understanding it.
+Names MUST be lowercase and MUST be valid HTTP tokens. Values are opaque UTF-8, at most 65,535
+octets, and are **always** length-prefixed — including `:status`, which travels as the ASCII
+string `"200"`, not as an integer.
 
 ### 6.1 Static table
-
-Ten names, numbered. This is HPACK's first mechanism. Real traffic reuses a tiny vocabulary of
-names endlessly, so spending fifteen octets to spell `content-length` on every response is
-pure waste; an index turns it into one.
 
 | # | Name | | # | Name |
 |---|---|---|---|---|
@@ -210,115 +134,46 @@ pure waste; an index turns it into one.
 | 4 | `host` | | 9 | `date` |
 | 5 | `content-length` | | 10 | `connection` |
 
-Indices are on the wire, so this table is **frozen**. A version 2 may only append; reordering
-or inserting would silently change the meaning of octets already in flight. Any name outside
-the table travels as a literal, so the table's shortness costs bytes and never correctness.
-Receiving an index above 10 is a `400` — a peer using it is out of spec, and unlike an unknown
-frame type, silently dropping a header whose name we cannot resolve could discard something
-load-bearing.
+Indices are on the wire, so this table is frozen; a later version may only append. A name
+outside the table travels as a literal. Receiving an index above 10 MUST be answered `400`.
 
 ### 6.2 Pseudo-headers
 
-`:method`, `:path` and `:status` begin with a colon, which is not legal in an HTTP token. That
-is the point: it makes the namespace of control fields provably disjoint from the namespace of
-real header names, so no client can forge a `:status` by naming a header cleverly. Requests
-use `:method` and `:path`; responses use `:status`. Neither may use the other's.
-
-### 6.3 What this leaves out
-
-HPACK's third mechanism, the **dynamic table** — entries added at runtime and referenced by
-later requests — is where the real compression ratio lives, and it is deliberately absent.
-It requires both peers to evolve byte-identical tables in lockstep, turns each header block
-into a stateful delta against every block before it, and is what made the CRIME class of
-attacks possible. A version 2 may add it; version 1 stays stateless.
-
----
+`:method`, `:path` and `:status` begin with a colon, which is not legal in an HTTP token, so
+the control namespace is disjoint from real header names. Requests use `:method` and `:path`;
+responses use `:status`. Neither may use the other's.
 
 ## 7. Request and response semantics
 
-A request names a method and a path. Version 1 servers MUST support `GET` and SHOULD support
-`HEAD`; any other method is `405`.
+A server MUST support `GET` and SHOULD support `HEAD`; any other method is `405`.
 
-Paths are resolved against a document root supplied at startup. A server MUST reject any path
-that escapes the root after normalisation, MUST reject paths not starting with `/`, and
-SHOULD map a trailing `/` to `index.html`.
+Paths resolve against a document root given at startup. A server MUST reject a path that
+escapes the root after normalisation, MUST reject a path not starting with `/`, and SHOULD map
+a trailing `/` to `index.html`.
 
 | Status | When |
 |---|---|
-| `200` | The file was found and is being sent. |
-| `400` | The frame or header block was malformed, or the stream id was invalid. |
+| `200` | Found; the body follows. |
+| `400` | Malformed frame or header block, or an invalid stream id. |
 | `403` | The path resolved outside the document root. |
 | `404` | No such file. |
 | `405` | The method is not `GET` or `HEAD`. |
-| `500` | The server failed while reading a file it had already found. |
+| `500` | The server failed reading a file it had already found. |
 
-A response carries `:status`, `content-length`, and `content-type` for a body. `content-length`
-MUST equal the total octets across the following `DATA` frames — it is advisory here, since
-`END_MESSAGE` is what actually terminates the body, but a client that can size its buffer in
-advance does not have to grow one.
+A response carries `:status`, and for a body also `content-type` and `content-length`.
+`content-length` MUST equal the total octets across the following `DATA` frames; it is
+advisory, since `END_MESSAGE` is what terminates the body.
 
 ### 7.1 Error recovery
 
-A server MUST distinguish two failures:
+A receiver MUST distinguish two failures:
 
-- **Framing intact** — the frame header was read, so `Length` octets were consumed and the
-  next header is where it should be. The server replies `400` and **keeps the connection
-  open**. Malformed header blocks and bad stream ids land here.
-- **Framing lost** — a header or payload was truncated. The server MAY reply `400` and then
-  MUST close, because it can no longer locate the next frame boundary and every subsequent
-  read would be garbage interpreted as structure.
-
----
-
-## 8. Worked example
-
-`docs/annotated-frame.md` contains a complete request and response captured from the reference
-implementation, every octet annotated.
+- **Framing intact** — the frame header was read, so `Length` octets were consumed and the next
+  header is where it should be. Reply `400` and **keep the connection open**. Malformed header
+  blocks, bad stream ids and oversize frames land here.
+- **Framing lost** — a header or payload was truncated. The receiver MAY reply `400` and then
+  MUST close, having no way to locate the next frame boundary.
 
 ---
 
-## 9. Conformance checklist
-
-An implementation is LCB/1 conformant if all of the following hold. Each line is a thing a
-peer can actually do to you.
-
-**Framing**
-
-- [ ] The client sends `4c 43 42 31` before its first frame; the server closes without reply on
-      anything else.
-- [ ] Every frame header is read as exactly 8 octets and every payload as exactly `Length`.
-- [ ] A frame with `Length` above 65,536 is skipped (all `Length` octets discarded) and
-      answered `400` — **not** closed.
-- [ ] A truncated header or payload closes the connection; it is not answered and resumed.
-
-**Extensibility — the rule in §4**
-
-- [ ] An unknown frame **type** is skipped cleanly and the connection continues.
-- [ ] An undefined **flag** bit is ignored, not rejected.
-- [ ] The **R** bit is ignored on receipt and sent as 0.
-
-**Streams**
-
-- [ ] Client stream ids are odd, non-zero, and strictly increasing; violations are `400`.
-- [ ] `PING` uses stream id 0; nothing else does.
-- [ ] Responses are emitted on the stream id of their request.
-
-**Header blocks**
-
-- [ ] The block is parsed until the payload is exhausted, with no field count consulted.
-- [ ] Static indices 1–10 decode to §6.1's names in that order; index 0 reads a literal name;
-      an index above 10 is `400`.
-- [ ] Values are read as exactly their 16-bit length, including `:status`.
-- [ ] Names are lowercase; a name with uppercase or non-token octets is `400`.
-
-**Semantics**
-
-- [ ] `REQUEST` carries `:method`, `:path` and `host`, and sets `END_MESSAGE`.
-- [ ] `RESPONSE` carries `:status`.
-- [ ] The last `DATA` frame sets `END_MESSAGE`; an empty body is one zero-length `DATA` with it.
-- [ ] A `HEAD` response sets `END_MESSAGE` on the `RESPONSE` frame and sends no `DATA`.
-- [ ] A `PING` without `ACK` is echoed with `ACK` and the same payload; a `PING` with `ACK` is
-      not answered.
-- [ ] Paths resolving outside the document root are `403`; missing files are `404`; methods
-      other than `GET`/`HEAD` are `405`.
-- [ ] The connection stays open across all of the above except a lost frame boundary.
+A complete annotated exchange is in `docs/annotated-frame.md`.

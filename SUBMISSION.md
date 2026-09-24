@@ -62,6 +62,7 @@ curl "http://localhost:8080/add?a=2&b=3"
 ```bash
 mvn -o test                                 # 130 JUnit tests, all passing
 python3 tests/persistent_socket_check.py    # the marking procedure
+python3 tests/conformance_check.py          # LCB/1 conformance: 18/18
 ```
 
 The marking script opens **one** socket, issues every request from the assignment, and reports:
@@ -75,8 +76,13 @@ socket still open: True
 
 See:
 
-- `docs/SPEC.md` — the complete wire format, including a conformance checklist
+- `docs/SPEC.md` — the complete wire format, two pages
 - `docs/annotated-frame.md` — one complete request and response, every octet annotated
+- `docs/design-notes.md` — why the fields and widths are what they are
+- `docs/conformance.md` — the conformance checklist and how to run the tester
+
+`tests/conformance_check.py` is an independent implementation of LCB/1 written from `SPEC.md`
+alone, in Python, sharing no code with the Java. It passes 18/18 against `bserve`.
 
 ## 6. Example
 
